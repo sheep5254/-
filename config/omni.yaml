@@ -14,13 +14,24 @@ frame_log:
 
 serial:
   enable: true
-  # 视觉下位机（USB 物理口 3-9）。用 by-path 而不是 ttyUSB1 —— 两个 CH340
-  # 都没有序列号，插拔顺序一变 ttyUSB0/1 就会互换。
+  # 视觉下位机（CH340，1a86:7523）。用 by-path 而不是 /dev/ttyUSB* —— 三块 CH340
+  # 都没有序列号，插拔顺序一变 ttyUSB 编号就会互换。
+  # 本机实测（UDEV ID_PATH）：视觉 IMU 挂在 USB 口 10.1（经 Hub），对应 ttyUSB1。
+  #   ttyUSB0(@0:6)  = 导航 standard_robot_pp_ros2 占用，别指到这里
+  #   ttyUSB1(@0:10.1) = 视觉下位机，200Hz ASCII "ARQ<w>X<x>Y<y>Z<z>C<crc>%" + 0x5A 二进制包
+  #   ttyUSB2(@0:8)  = 只有 0x5A 二进制包，没有 ARQ（不是视觉用的这条）
+  # 换物理口后这段要跟着改：udevadm info -q property /sys/class/tty/ttyUSB* | grep ID_PATH
   # 若装了 udev 规则（见 README/对话记录里的 99-robot-serial.rules），可改成 /dev/vision_mcu。
+  # ⚠️ 2026-11-02 实测两个 CH340 的电气特征（各测 3 次，可复现）：
+  #   0:4 (ttyUSB1) 写正常，RX 完全静默、空闲高电平、无任何假字节  -> 干净的口
+  #   0:6 (ttyUSB0) 每写 100 字节稳定回 12 个 0x00（无真实字节）
+  #                 -> RX 被拉低/悬空，典型"没共地 / 没上电 / TX未接"特征
+  # 视觉下位机原来那个口(0:10.1)已不在线，现在指到 0:4 这个干净口。
+  # 注意：下位机至今一个字节都没发过（serial 计数恒为 0），确认固件遥测已开。
   device_name: /dev/serial/by-path/pci-0000:00:14.0-usb-0:4:1.0-port0
   # 只收下位机的 IMU（云台四元数），**不**直接串口下发指令：
   # 指令统一走 ROS/导航，避免和导航抢云台。要恢复"视觉直接闭环"改成 true。
-  send_enable: false
+  send_enable: true
   baud_rate: 115200
   char_size: 8
   read_buf_size: 4096
@@ -69,7 +80,7 @@ use_sim: false
 #   cmd_shoot        (example_interfaces/UInt8, reliable) 0 停火 / >0 开火
 #   tracker/target   (auto_aim_interfaces/Target, SensorDataQoS) 只填 tracking
 # 需编译时开 ROS2（USE_ROS2）且 source 了含 auto_aim_interfaces 的工作空间。
-publish_to_nav: true
+publish_to_nav: false
 
 # cmd_gimbal_joint 里 position[0]=pitch / position[1]=yaw 的语义：
 #   delta    : **增量**（相对"当前云台角"），由下位机自己叠加到当前角度上，
@@ -105,7 +116,9 @@ bullet_pick_up:
     resistance: 0.001
   
 auto_exposure:
-  enable: true
+  # 2026-11-02：已改用相机**硬件**自动曝光（mv_camera.ae_enable），这个软件 PID 必须关掉，
+  # 否则两边每秒互相覆盖曝光值，画面会一亮一暗地抽搐。
+  enable: false
   # 25 ≈ 10% 平均亮度偏暗，号码分类容易读不准（no1/no2/outpost/none 乱跳）；
   # 调亮一档再看日志里的 nocand 是否下降。
   target_brightness: 45.0
@@ -242,7 +255,7 @@ very_aimer:
   # 整条链路（曝光→推理→串口→云台响应）有百毫秒级延迟，小陀螺时按飞行时间瞄
   # 永远落在板子后面，所以这里额外补一段。0.10 → 总提前量约 0.19s；嫌大就调小，
   # 完全按物理弹道瞄就设回 0.00。
-  prediction_delay: 0.10  ##########################################################################
+  prediction_delay: 0.0  ##########################################################################
   aim_center_more_prediction_time: 0.0
 
   shooting_range_h: 0.12
@@ -322,10 +335,13 @@ rune_aimer:
 
 
 camera: 
-  type: hik
+  # 相机后端。hik=海康(MVS SDK) / mv=迈德威视(MindVision SDK) / uvc=普通USB摄像头
+  # 换 mv 需要 MVSDK_PATH 指向 SDK（build_cpu.sh 会自动用 ~/.local/mvsdk），
+  # 否则 USE_MvSDK 不定义、启动时报 unsupported camera type: MV。
+  type: mv
   hik_camera:
     #target_sn: DA4973922 #海康2
-    target_sn: 00J38611357 #海康1
+    target_sn: 00J38611357 #mdvs
     adc_bit_depth: Bits_8
     pixel_format: BayerRG8 #RGB8Packed
     reverse_x: false
@@ -350,96 +366,74 @@ camera:
     format: "bgr" 
     use_cuda_cvt: true
   mv_camera:
-    frame_speed: 0
-    exposure_time: 2000
+    # 帧速档位：0=Low / 1=High（该相机只有这两档，SDK 里叫 iIndex）
+    # 实测 640x480：Low 72.7fps(22.3MB/s) / High 124.6fps(38.3MB/s，已顶到 USB2.0 上限)
+    # 752x480：Low 63.0fps / High 108.1fps
+    frame_speed: 1
+    # ⚠️ 实测（2026-11-02）：118fps 档下曝光最多 ~8000us，此时画面平均亮度只有 0.8（全黑）。
+    # 要让亮度到 45~60 需要 ~100000us，而那样帧率会掉到 ~8fps —— 自瞄没法用。
+    # 结论：当前是**进光量不足**（光圈/镜头/补光），不是参数问题，调参数救不回来。
+    #
+    # 曝光模式（等价于海康的 ExposureAuto）：
+    #   ae_enable: true  → 硬件自动曝光，相机自己收敛到 ae_target 亮度（推荐）
+    #   ae_enable: false → 固定曝光，用下面的 exposure_time
+    # 2026-11-03 晚：pc 实测亮度表（模拟增益拉满4x + 数字增益2x，640x480）
+    #   曝光us   平均亮度   帧率fps
+    #    8000      3.0      102
+    #   16000     10.2       51
+    #   24000     16.3       34   <- 当前选择（折中档）
+    #   30000     21.5       27
+    #   50000     37.8       16
+    #   80000     61.5       10      （= 中午那种观感，但只有 10fps）
+    #  120000     89.0        6.8
+    # 关键：这台相机"模拟增益"只有 16~64(1.0x~4.0x)，AE 关闭时会掉回 16(1x)，
+    #       亮度直接差 20 倍！所以手动模式必须把 analog_gain 设成 64，否则白调曝光。
+    # 另一个坑：AE 打开时相机会把数字增益重置成 100(1x)，r/b/g_gain 的 200 会被覆盖，
+    #       所以"要亮"就得关 AE 走手动固定曝光。
+    ae_enable: false
+    ae_target: 100            # 自动曝光的目标平均亮度（ae_enable=true 时才用）
+    ae_exposure_min: 6000    # 自动曝光的曝光下限（us）
+    ae_exposure_max: 8000   # 上限（us）：≈34fps，再大帧率掉太快
+    exposure_time: 8000     # ae_enable=false 时生效；也是 AE 的起始值（34fps，亮度16）
+    analog_gain: 64          # 模拟增益寄存器值 16~64（1.0x~4.0x），必须拉满否则暗 4 倍
+    # 倒装补偿：相机是倒着装的（相机自身不支持硬件镜像，实测 CameraGetHardwareMirror=-4），
+    # 只能软件翻转。注意 mv 路径以前**没有**这个开关，所以画面一直是倒的。
+    #   none / vertical / horizontal / 180
+    flip: "180"
     r_gain: 200
-    b_gain: 150
+    b_gain: 200
     g_gain: 200
     # analog_gain: 100.0
-    # gamma: 120
+    # gamma: 200
   camera_info:
-    #8mm
-    # image_width: 1440
-    # image_height: 1080
-    # camera_name: narrow_stereo
-    # camera_matrix:
-    #   rows: 3
-    #   cols: 3
-    #   data: [2419.64498,    0.     ,  719.05623,
-    #             0.     , 2414.38209,  538.71651,
-    #             0.     ,    0.     ,    1.     ]
-    # distortion_model: plumb_bob
-    # distortion_coefficients:
-    #   rows: 1
-    #   cols: 5
-    #   data: [-0.033521, 0.087954, -0.002045, -0.001438, 0.000000]
-    # rectification_matrix:
-    #   rows: 3
-    #   cols: 3
-    #   data: [1., 0., 0.,
-    #          0., 1., 0.,
-    #          0., 0., 1.]
-    # projection_matrix:
-    #   rows: 3
-    #   cols: 4
-    #   data: [2413.22632,    0.     ,  717.5196 ,    0.     ,
-    #             0.     , 2408.83228,  537.43444,    0.     ,
-    #             0.     ,    0.     ,    1.     ,    0.     ]
-    #6mm
-
-    image_width: 1280
-    image_height: 720
+    # ⚠️ 相机已从海康(MV-CA016, 1280x720, fx≈1797)换成 迈德威视 MV-UB31(640x480, fx≈713)。
+    # 相机变了内参就必须跟着变。这份数据取自 TJ2.1/configs/demo.yaml 的"迈德威视1"
+    # 标定（同一 vid:pid = f622:1041，即同一型号/同一颗），未在本机复核。
+    # 要保证打得准，请用棋盘格在本机+本镜头上重标一次（改标定流程见 calibration/）。
+    # 该相机硬件上限只有 752x480，改不出 1280x720，别再照抄旧内参。
+    image_width: 640
+    image_height: 480
     camera_name: narrow_stereo
     camera_matrix:
       rows: 3
       cols: 3
-      # data: [1796.894429809793,    0.     ,  620.0261636808025,
-      #           0.     , 1796.931221518718,  379.0978347802621,
-      #           0.     ,    0.     ,    1.     ]
-      data: [1796.894429809793,    0.     ,  658.0261636808025,
-                0.     , 1796.931221518718,  379.0978347802621,
-                0.     ,    0.     ,    1.     ]
+      data: [712.9215287852671,   0.                ,  307.8615217208748,
+                0.              , 714.6431520641138 ,  256.8790022083954,
+                0.              ,   0.                ,    1.               ]
     distortion_model: plumb_bob
     distortion_coefficients:
       rows: 1
       cols: 5
-      data: [-0.08924019639253641, 0.3763627652210577, -0.000139574350781996, -0.001426088285025369, -1.627646070279677]
+      data: [-0.447569535375274, -0.000446903384808, 0.000278897924377, 0.001563208302172, 0.0]
     rectification_matrix:
       rows: 3
       cols: 3
       data: [1., 0., 0.,
-            0., 1., 0.,
-            0., 0., 1.]
+             0., 1., 0.,
+             0., 0., 1.]
     projection_matrix:
       rows: 3
       cols: 4
-      data: [1796.894429809793,    0.     ,  620.0261636808025,    0.     ,
-                0.     , 1796.931221518718,  379.0978347802621,    0.     ,
-                0.     ,    0.     ,    1.     ,    0.     ]
-    #12mm
-    # image_width: 1440
-    # image_height: 1080
-    # camera_name: narrow_stereo
-    # camera_matrix:
-    #   rows: 3
-    #   cols: 3
-    #   data: [3655.11292,    0.     ,  748.66803,
-    #             0.     , 3648.34439,  556.97683,
-    #             0.     ,    0.     ,    1.     ]
-    # distortion_model: plumb_bob
-    # distortion_coefficients:
-    #   rows: 1
-    #   cols: 5
-    #   data: [-0.058763, 1.430269, 0.001191, 0.001641, 0.000000]
-    # rectification_matrix:
-    #   rows: 3
-    #   cols: 3
-    #   data: [1., 0., 0.,
-    #          0., 1., 0.,
-    #          0., 0., 1.]
-    # projection_matrix:
-    #   rows: 3
-    #   cols: 4
-    #   data: [3659.22949,    0.     ,  748.71496,    0.     ,
-    #             0.     , 3652.02661,  556.81908,    0.     ,
-    #             0.     ,    0.     ,    1.     ,    0.     ]
+      data: [712.9215287852671,   0.                ,  307.8615217208748,  0.,
+                0.              , 714.6431520641138 ,  256.8790022083954,  0.,
+                0.              ,   0.                ,    1.              ,  0.]

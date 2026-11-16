@@ -179,6 +179,8 @@ int main(int argc, char** argv) {
     if (second_arg) {
         debug = second_arg.value() == "true";
     }
+    // 调试窗口名（GUI 线程创建/缩放/显示都走这个常量，避免写死字符串不一致）
+    static constexpr const char* WINDOW_NAME = "awakening auto_aim";
     // 原生 imshow 窗口：默认在有显示环境(DISPLAY/WAYLAND_DISPLAY)时开启。
     //   AWAKENING_IMSHOW=1     强制开启
     //   AWAKENING_NO_IMSHOW=1  强制关闭
@@ -1359,8 +1361,10 @@ int main(int argc, char** argv) {
                 }
 
                 // 停火必须显式发 0（导航侧会锁存）
+                // 只发 0/1：下位机固件按 0/1 判定开火，发 2 会被当非法值。
+                // （历史上下位机收到 0/2，与串口 AAP 帧的 F0/F1 也不一致，此处统一为 0/1。）
                 example_interfaces::msg::UInt8 shoot_msg;
-                shoot_msg.data = (cmd.appear && cmd.fire_advice) ? 2 : 0; // 2 = 连发
+                shoot_msg.data = (cmd.appear && cmd.fire_advice) ? 1 : 0;
                 shoot_cmd_pub->publish(shoot_msg);
             }
 
@@ -1605,7 +1609,21 @@ int main(int argc, char** argv) {
                             3,
                             cv::LINE_AA
                         );
-                        cv::imshow("awakening auto_aim", shown);
+                        // 调试窗口按 2 倍尺寸显示（例如 640x480 -> 1280x960）。
+                        // 用 WINDOW_NORMAL + resizeWindow 让 OpenCV 自己缩放，
+                        // 不额外占每帧 CPU（不要在这里 cv::resize 放大图像）。
+                        static bool debug_window_scaled = false;
+                        if (!debug_window_scaled) {
+                            constexpr double kDebugWindowScale = 2.0;
+                            cv::namedWindow(WINDOW_NAME, cv::WINDOW_NORMAL);
+                            cv::resizeWindow(
+                                WINDOW_NAME,
+                                static_cast<int>(shown.cols * kDebugWindowScale),
+                                static_cast<int>(shown.rows * kDebugWindowScale)
+                            );
+                            debug_window_scaled = true;
+                        }
+                        cv::imshow(WINDOW_NAME, shown);
                     }
                     const int key = cv::waitKey(1);
                     if (key == 27 || key == 'q') {

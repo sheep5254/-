@@ -39,7 +39,7 @@ using UVLVecZ = Eigen::Matrix<double, UVLZ_N, 1>;
 using YPDVecZ = Eigen::Matrix<double, YPDZ_N, 1>;
 constexpr int DIFFZ_N = 1;
 using DiffVecZ = Eigen::Matrix<double, DIFFZ_N, 1>;
-constexpr bool USE_WROT = true;
+constexpr bool USE_WROT = false;
 template<typename T>
 inline T normalize_angle(T a) {
     const T two_pi = T(2.0 * M_PI);

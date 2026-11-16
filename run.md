@@ -21,7 +21,7 @@ cd ~/Downloads/awakening-main
 ```
 
 
-cd ~/Downloads/awakening-main
+cd ~/下载/awake1.0
 ./plotjuggler.sh
 
 

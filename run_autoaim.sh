@@ -71,6 +71,18 @@ fi
 
 export LD_LIBRARY_PATH="/opt/MVS/lib/64:/opt/MVS/lib/32:$ROOT/build:${LD_LIBRARY_PATH:-}"
 
+# ---- ROS 日志目录 ----
+# rclcpp::init 会往 $ROS_HOME/log（默认 ~/.ros/log）写 spdlog 文件，打不开就
+# 直接 abort。容器/沙箱里 $HOME 常是只读的，于是回退到项目内的 log/ros。
+_ros_home="${ROS_HOME:-$HOME/.ros}"
+if ! ( mkdir -p "$_ros_home" && [ -w "$_ros_home" ] ) 2>/dev/null; then
+    export ROS_LOG_DIR="$ROOT/log/ros"
+    export ROS_HOME="$ROOT/log/ros/home"
+    mkdir -p "$ROS_LOG_DIR" "$ROS_HOME"
+    echo "提示：$HOME/.ros 不可写，ROS 日志改到 $ROS_LOG_DIR"
+fi
+unset _ros_home
+
 CONFIG="${1:-$ROOT/config/omni.yaml}"
 
 if [ "$#" -ge 2 ]; then

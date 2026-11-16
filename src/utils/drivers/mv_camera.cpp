@@ -47,6 +47,8 @@ ImageFrame MvCamera::read() {
     #endif
     CameraReleaseImageBuffer(h_camera_, raw);
 
+    apply_flip(frame.src_img); // 倒装补偿（mv_camera.flip）
+
     frame.timestamp = current_time - half_exposure;
     frame.format = PixelFormat::BGR;
     return frame;
@@ -72,13 +74,79 @@ void MvCamera::load(const YAML::Node& config) {
         return;
     }
     CameraGetCapability(h_camera_, &t_capability_);
-    CameraSetAeState(h_camera_, false);
+    // 曝光模式：跟海康的 ExposureAuto 一样，可配成"相机自己调"或"固定值"。
+    //   ae_enable: true  -> 开硬件自动曝光（Continuous），亮度自动收敛到 ae_target；
+    //                       曝光范围由 ae_exposure_min/max 夹住，避免它为了变亮把曝光
+    //                       拉到 100ms 以上把帧率拖到个位数。
+    //   ae_enable: false -> 关自动曝光，用 exposure_time 固定（默认行为）。
+    // 注意：这台相机上电默认是**自动**的（实测 AeState=1、曝光漂到 7340us），所以
+    // 两条分支都必须显式设置并回读确认，不能靠默认值。
+    const bool ae_enable = config["ae_enable"] ? config["ae_enable"].as<bool>() : false;
+    if (ae_enable) {
+        const int ae_target = config["ae_target"] ? config["ae_target"].as<int>() : 45;
+        CameraSetAeTarget(h_camera_, ae_target);
+        if (config["ae_exposure_min"] && config["ae_exposure_max"]) {
+            const double emin = config["ae_exposure_min"].as<double>();
+            const double emax = config["ae_exposure_max"].as<double>();
+            CameraSetAeExposureRange(h_camera_, emin, emax);
+            AWAKENING_INFO("MvCamera: 自动曝光范围 {} ~ {} us", emin, emax);
+        }
+        CameraSetAeState(h_camera_, true);
+        BOOL ae_state = -1;
+        CameraGetAeState(h_camera_, &ae_state);
+        int target_now = 0;
+        CameraGetAeTarget(h_camera_, &target_now);
+        auto exposure_time = config["exposure_time"].as<double>();
+        set_ExposureTime(exposure_time); // 给个起点，之后由 AE 自己收敛
+        AWAKENING_INFO(
+            "MvCamera: 自动曝光已开启 (AeState={}, 目标亮度={}) —— 硬件 AE，等价于海康 "
+            "ExposureAuto=Continuous",
+            static_cast<int>(ae_state),
+            target_now
+        );
+    } else {
+        // 关闭自动曝光（AE）。相机上电默认是自动的，曝光会在几帧内自己漂到 7340us
+        // 左右，完全盖掉下面设置的固定曝光。这里把返回值回读一次：万一没关成功，
+        // 程序会一直带着自动曝光跑，图像亮度随环境变化，所有基于亮度的装甲板阈值
+        // 都会失效 —— 必须在启动日志里能看见。
+        const auto ae_status = CameraSetAeState(h_camera_, false);
+        BOOL ae_state = -1;
+        CameraGetAeState(h_camera_, &ae_state);
+        if (ae_status != CAMERA_STATUS_SUCCESS || ae_state != 0) {
+            AWAKENING_ERROR(
+                "MvCamera: 关闭自动曝光失败! status={} AeState={} (1=仍是自动)，"
+                "图像亮度会自动变化，识别阈值将不可靠",
+                static_cast<int>(ae_status),
+                static_cast<int>(ae_state)
+            );
+        } else {
+            AWAKENING_INFO(
+                "MvCamera: 自动曝光已关闭 (AeState={}, 手动曝光)", static_cast<int>(ae_state)
+            );
+        }
+    }
+    // 倒装补偿：相机是倒着装的，Sensor 出来的图就是倒的（相机自身不支持硬件镜像，
+    // 实测 CameraGetHardwareMirror 返回 -4 不支持）。这里用软件翻转，配置 mv_camera.flip。
+    const std::string flip_str =
+        config["flip"] ? utils::to_upper(config["flip"].as<std::string>()) : std::string("NONE");
+    if (flip_str == "VERTICAL" || flip_str == "V") {
+        flip_code_ = 0;
+    } else if (flip_str == "HORIZONTAL" || flip_str == "H") {
+        flip_code_ = 1;
+    } else if (flip_str == "180" || flip_str == "ROTATE_180" || flip_str == "BOTH") {
+        flip_code_ = -1;
+    } else {
+        flip_code_ = -2;
+    }
+    AWAKENING_INFO("MvCamera: flip = {} (code {})", flip_str, flip_code_);
     CameraSetIspOutFormat(h_camera_, CAMERA_MEDIA_TYPE_BGR8);
     CameraSetTriggerMode(h_camera_, 0);
     int frame_speed = config["frame_speed"].as<int>();
     CameraSetFrameSpeed(h_camera_, frame_speed);
-    auto exposure_time = config["exposure_time"].as<double>();
-    set_ExposureTime(exposure_time);
+    if (!ae_enable) {
+        auto exposure_time = config["exposure_time"].as<double>();
+        set_ExposureTime(exposure_time);
+    }
     if (config["r_gain"] && config["b_gain"] && config["g_gain"]) {
         auto r_gain = config["r_gain"].as<double>();
         auto b_gain = config["b_gain"].as<double>();

@@ -104,7 +104,13 @@ void ArmorTarget::reset(
     p0.diagonal()[idx::CX] = p0.diagonal()[idx::CY] = p0.diagonal()[idx::CZ] = 1;
     p0.diagonal()[idx::VCX] = p0.diagonal()[idx::VCY] = p0.diagonal()[idx::VCZ] = 10;
     p0.diagonal()[idx::C_ROT_Z] = p0.diagonal()[idx::C_ROT_Y] = p0.diagonal()[idx::C_ROT_X] = 1;
-    p0.diagonal()[idx::LOG_R1] = p0.diagonal()[idx::LOG_R2] = p0.diagonal()[idx::H] = 1;
+    // 半径/高度差是物理常数（标准机器人 4 块板绕车心 0.26m、同一高度），不是待估量。
+    // 实测放开这两个自由度时：r1 跑到 0.020~2.585m、r2 跑到 0.001~1.290m，而车心
+    // 是由"板位置 + r·法向"反推的，于是画出来的整车坐标系会平移着乱飞——车心
+    // 离枪口最近塌到 0.28m（solve_pitch 直接失败）、最远离检测板 2.63m、
+    // 相邻帧跳 2.93m。单块可见板时这两个量本来就不可观测。
+    // 初值方差收到 1e-6(≈0.1%)，配合 q_r / q_h = 1e-7，等效把它们钉死。
+    p0.diagonal()[idx::LOG_R1] = p0.diagonal()[idx::LOG_R2] = p0.diagonal()[idx::H] = 1e-6;
     if (target_number == ArmorClass::OUTPOST) {
         p0.diagonal()[idx::OUTPOST01DZ] = p0.diagonal()[idx::OUTPOST02DZ] = 1;
     }
@@ -397,6 +403,7 @@ int ArmorTarget::update(
         };
         UVLMeasure measure { .ctx = ctx };
         obs.push_back(esekf->make_obs(observation, measure, u_r, cal_uvl_residual));
+
     };
 
     auto add_uva_obs = [&](Armor& a, int id) {
