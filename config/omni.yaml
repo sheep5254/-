@@ -81,6 +81,14 @@ use_sim: false
 #   tracker/target   (auto_aim_interfaces/Target, SensorDataQoS) 只填 tracking
 # 需编译时开 ROS2（USE_ROS2）且 source 了含 auto_aim_interfaces 的工作空间。
 publish_to_nav: false
+# PlotJuggler 调试话题（独立开关，与 publish_to_nav 无关）：
+#   awake_debug/send_pitch  send_yaw   实际通过串口发给下位机的**增量**（度）
+#   awake_debug/cmd_pitch   cmd_yaw    规划出的目标绝对角（度）
+#   awake_debug/cur_pitch   cur_yaw    下位机回传的当前云台角（度）
+# 消息类型都是 std_msgs/msg/Float64，只依赖标准消息包，不需要 auto_aim_interfaces
+# 工作空间，所以可以在 publish_to_nav=false 的情况下单独打开。
+# 用法：./plotjuggler.sh 后再订阅这 6 个话题（单位 deg，发送频率≈下位机回传频率 100Hz）
+publish_debug: true
 
 # cmd_gimbal_joint 里 position[0]=pitch / position[1]=yaw 的语义：
 #   delta    : **增量**（相对"当前云台角"），由下位机自己叠加到当前角度上，

@@ -40,6 +40,8 @@
     #include "sensor_msgs/msg/joint_state.hpp"
     #include "sensor_msgs/msg/camera_info.hpp"
     #include "sensor_msgs/msg/image.hpp"
+    // PlotJuggler 调试话题用的标量消息
+    #include "std_msgs/msg/float64.hpp"
     #include <rclcpp/qos.hpp>
 #endif
 #include "backward-cpp/backward.hpp"
@@ -256,6 +258,40 @@ int main(int argc, char** argv) {
         );
         AWAKENING_INFO(
             "publish_to_nav: cmd_gimbal_joint / cmd_shoot / tracker/target"
+        );
+    }
+    // ── PlotJuggler 调试话题 ────────────────────────────────────────────────
+    // 把"真正发给下位机的那两个增量"以及规划目标角/当前云台角发成 ROS2 话题，
+    // 方便在 PlotJuggler 里对齐时间轴看滞后（例如小陀螺时 pitch 追不上、慢慢下垂）。
+    //   awake_debug/send_pitch  awake_debug/send_yaw  —— 实际下发的增量（度）
+    //   awake_debug/cmd_pitch   awake_debug/cmd_yaw   —— 规划出的目标角（度）
+    //   awake_debug/cur_pitch   awake_debug/cur_yaw   —— 下位机回传的当前角（度）
+    // 只依赖 std_msgs/Float64，**不需要** auto_aim_interfaces 工作空间，
+    // 所以 publish_to_nav=false 时也能单独打开（publish_debug: true）。
+    const bool publish_debug =
+        config["publish_debug"] ? config["publish_debug"].as<bool>() : false;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr dbg_send_pitch_pub;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr dbg_send_yaw_pub;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr dbg_cmd_pitch_pub;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr dbg_cmd_yaw_pub;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr dbg_cur_pitch_pub;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr dbg_cur_yaw_pub;
+    if (publish_debug) {
+        const auto dbg_qos = rclcpp::QoS(rclcpp::KeepLast(10));
+        dbg_send_pitch_pub =
+            rcl_node.make_pub<std_msgs::msg::Float64>("awake_debug/send_pitch", dbg_qos);
+        dbg_send_yaw_pub =
+            rcl_node.make_pub<std_msgs::msg::Float64>("awake_debug/send_yaw", dbg_qos);
+        dbg_cmd_pitch_pub =
+            rcl_node.make_pub<std_msgs::msg::Float64>("awake_debug/cmd_pitch", dbg_qos);
+        dbg_cmd_yaw_pub =
+            rcl_node.make_pub<std_msgs::msg::Float64>("awake_debug/cmd_yaw", dbg_qos);
+        dbg_cur_pitch_pub =
+            rcl_node.make_pub<std_msgs::msg::Float64>("awake_debug/cur_pitch", dbg_qos);
+        dbg_cur_yaw_pub =
+            rcl_node.make_pub<std_msgs::msg::Float64>("awake_debug/cur_yaw", dbg_qos);
+        AWAKENING_INFO(
+            "publish_debug: awake_debug/{send,cmd,cur}_{pitch,yaw} (std_msgs/Float64, deg)"
         );
     }
 #endif
@@ -1261,6 +1297,28 @@ int main(int argc, char** argv) {
             const double aim_error = std::hypot(send_pitch, send_yaw);
             const int fire =
                 (control && cmd.fire_advice && aim_error < AIM_PRECISION_THRESH) ? 1 : 0;
+
+#ifdef USE_ROS2
+            // 调试发布：与串口实际下发的同一份数值（增量单位：度）
+            if (publish_debug) {
+                const auto now_dbg = Clock::now();
+                const auto pub = [&](auto& publisher, double value) {
+                    if (!publisher) {
+                        return;
+                    }
+                    std_msgs::msg::Float64 msg;
+                    msg.data = value;
+                    publisher->publish(msg);
+                };
+                (void)now_dbg;
+                pub(dbg_send_pitch_pub, send_pitch);
+                pub(dbg_send_yaw_pub, send_yaw);
+                pub(dbg_cmd_pitch_pub, cmd.pitch);
+                pub(dbg_cmd_yaw_pub, cmd.yaw);
+                pub(dbg_cur_pitch_pub, cur_pitch_deg);
+                pub(dbg_cur_yaw_pub, cur_yaw_deg);
+            }
+#endif
 
             auto frame = ascii_serial::build_send_frame(
                 send_pitch, send_yaw, fire, ascii_frame_count++, ascii_crc_mode

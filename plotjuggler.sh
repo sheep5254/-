@@ -102,6 +102,13 @@ echo "  原 LD_AUDIT   = [${LD_AUDIT:-}]"
 echo "  原 LD_LIBRARY_PATH 中 /snap/ 条目数: $(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -c '/snap/' || true)"
 echo "  订阅话题: /cmd_gimbal_joint  /cmd_shoot  /tracker/target"
 echo "  （/cmd_shoot 为 example_interfaces/UInt8；/tracker/target 是 SensorDataQoS）"
+echo
+echo "  下发量监测（config 里 publish_debug: true 时发布，单位 deg，≈100Hz）："
+echo "    /awake_debug/send_pitch  /awake_debug/send_yaw   实际发给下位机的增量"
+echo "    /awake_debug/cmd_pitch   /awake_debug/cmd_yaw    规划出的目标绝对角"
+echo "    /awake_debug/cur_pitch   /awake_debug/cur_yaw    下位机回传的当前角"
+echo "  三个 pitch 放一起就能看出滞后：cur_pitch 一直追不上 cmd_pitch 就是轨迹没跟上。"
+echo "  这 6 个是 std_msgs/Float64，不依赖 auto_aim_interfaces 工作空间。"
 if has_auto_aim_interfaces; then
     echo "  auto_aim_interfaces 类型支持: OK（/tracker/target 可解析）"
 else
